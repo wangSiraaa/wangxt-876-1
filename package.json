@@ -1,0 +1,21 @@
+{
+  "name": "lease-renewal-system",
+  "version": "1.0.0",
+  "description": "房屋租赁合同续签全栈管理系统",
+  "private": true,
+  "scripts": {
+    "install:all": "npm install --prefix server && npm install --prefix client",
+    "seed": "npm run seed --prefix server",
+    "dev": "concurrently \"npm run dev --prefix server\" \"npm run dev --prefix client\"",
+    "dev:server": "npm run dev --prefix server",
+    "dev:client": "npm run dev --prefix client",
+    "build": "npm run build --prefix client",
+    "start": "npm run start --prefix server",
+    "smoke": "node scripts/smoke.js",
+    "docker:up": "docker-compose up -d",
+    "docker:down": "docker-compose down"
+  },
+  "devDependencies": {
+    "concurrently": "^8.2.2"
+  }
+}

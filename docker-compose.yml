@@ -1,0 +1,47 @@
+version: '3.8'
+
+services:
+  server:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: lease-renewal-server
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./server/data:/app/server/data
+      - ./server/uploads:/app/server/uploads
+    environment:
+      - NODE_ENV=production
+      - PORT=3000
+      - JWT_SECRET=lease-renewal-jwt-secret-production-2024
+      - CORS_ORIGIN=*
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:3000/api/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    networks:
+      - lease-net
+
+  client:
+    build:
+      context: .
+      dockerfile: Dockerfile.client
+    container_name: lease-renewal-client
+    ports:
+      - "5173:5173"
+    depends_on:
+      server:
+        condition: service_healthy
+    environment:
+      - VITE_API_BASE_URL=http://localhost:3000
+    restart: unless-stopped
+    networks:
+      - lease-net
+
+networks:
+  lease-net:
+    driver: bridge

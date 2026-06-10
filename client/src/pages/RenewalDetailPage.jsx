@@ -17,7 +17,8 @@ import dayjs from 'dayjs';
 import { useAuth, ROLE_LABELS } from '../context/AuthContext.jsx';
 import {
   STATUS_LABELS, SIGN_STATUS_LABELS, SIGN_PARTY_LABELS, SIGN_STATE_LABELS,
-  ATTACHMENT_TYPE_LABELS, NEGOTIATION_TYPE_LABELS
+  ATTACHMENT_TYPE_LABELS, NEGOTIATION_TYPE_LABELS,
+  REVIEW_TYPE_LABELS, REVIEW_RESULT_LABELS
 } from '../utils/constants.js';
 
 const { Title, Text } = Typography;
@@ -700,6 +701,101 @@ export default function RenewalDetailPage() {
 
         <Col xs={24} lg={8}>
           <div className="page-card" style={{ marginBottom: 16 }}>
+            <div className="section-title"><span>法务复核结论</span></div>
+            {detail.legalReviewResult === 'PENDING' && detail.status === 'LEGAL_REVIEW_PENDING' ? (
+              <div style={{ textAlign: 'center', padding: '24px 16px' }}>
+                <ExclamationCircleOutlined style={{ fontSize: 32, color: '#faad14', marginBottom: 8 }} />
+                <div style={{ color: '#faad14', fontWeight: 500 }}>待法务复核</div>
+                <div style={{ fontSize: 12, color: '#8c8c8c', marginTop: 4 }}>租金涨幅超过阈值，正在等待法务审核</div>
+              </div>
+            ) : detail.legalReviewResult ? (
+              <div>
+                <Descriptions column={1} size="small" bordered>
+                  <Descriptions.Item label="复核状态">
+                    <Tag color={REVIEW_RESULT_LABELS[detail.legalReviewResult]?.color || 'default'}>
+                      {REVIEW_RESULT_LABELS[detail.legalReviewResult]?.text || detail.legalReviewResult}
+                    </Tag>
+                  </Descriptions.Item>
+                  <Descriptions.Item label="复核次数">
+                    <b>{detail.legalReviewCount || 0}</b> 次
+                  </Descriptions.Item>
+                  {detail.legalName && (
+                    <Descriptions.Item label="复核法务">
+                      {detail.legalName}
+                    </Descriptions.Item>
+                  )}
+                  {detail.legalReviewedAt && (
+                    <Descriptions.Item label="复核时间">
+                      {dayjs(detail.legalReviewedAt).format('YYYY-MM-DD HH:mm')}
+                    </Descriptions.Item>
+                  )}
+                  {detail.legalReviewComment && (
+                    <Descriptions.Item label="复核意见">
+                      <span style={{ whiteSpace: 'pre-wrap' }}>{detail.legalReviewComment}</span>
+                    </Descriptions.Item>
+                  )}
+                  {detail.reviewConclusion && (
+                    <Descriptions.Item label="审核结论">
+                      <span style={{ whiteSpace: 'pre-wrap', color: detail.legalReviewResult === 'REJECTED' ? '#ff4d4f' : '#52c41a' }}>
+                        {detail.reviewConclusion}
+                      </span>
+                    </Descriptions.Item>
+                  )}
+                </Descriptions>
+              </div>
+            ) : (
+              <div style={{ textAlign: 'center', padding: '24px 16px', color: '#8c8c8c' }}>
+                <SafetyCertificateOutlined style={{ fontSize: 24, marginBottom: 8 }} />
+                <div>暂无复核记录</div>
+                <div style={{ fontSize: 12, marginTop: 4 }}>如租金涨幅超过阈值将自动进入法务复核</div>
+              </div>
+            )}
+          </div>
+
+          {(detail.legalReviewRecords && detail.legalReviewRecords.length > 0) && (
+            <div className="page-card" style={{ marginBottom: 16 }}>
+              <div className="section-title">
+                <span>复核历史记录</span>
+                <Tag color="blue" style={{ marginLeft: 8 }}>{detail.legalReviewRecords.length} 条</Tag>
+              </div>
+              <Timeline
+                mode="left"
+                items={detail.legalReviewRecords.map((record, idx) => {
+                  const resultInfo = REVIEW_RESULT_LABELS[record.reviewResult] || {};
+                  return {
+                    color: record.reviewResult === 'PASSED' ? 'green' : 'red',
+                    label: dayjs(record.reviewedAt).format('YYYY-MM-DD HH:mm'),
+                    children: (
+                      <div>
+                        <Space style={{ marginBottom: 4 }}>
+                          <Tag color={resultInfo.color}>{resultInfo.text}</Tag>
+                          <Tag>{REVIEW_TYPE_LABELS[record.reviewType] || record.reviewType}</Tag>
+                          <b>{record.reviewerName}</b>
+                        </Space>
+                        <div style={{ fontSize: 12, marginBottom: 4 }}>
+                          租金：¥{record.previousRent} → <b style={{ color: record.exceedsThreshold ? '#ff4d4f' : '#1677ff' }}>¥{record.proposedRent}</b>
+                          （涨幅 <b style={{ color: record.exceedsThreshold ? '#ff4d4f' : '#52c41a' }}>{((record.increaseRate || 0) * 100).toFixed(2)}%</b>
+                          {record.exceedsThreshold && <span style={{ color: '#ff4d4f' }}> 超阈值</span>}）
+                        </div>
+                        {record.reviewComment && (
+                          <div style={{ fontSize: 12, color: '#8c8c8c' }}>
+                            意见：{record.reviewComment}
+                          </div>
+                        )}
+                        {record.reviewConclusion && (
+                          <div style={{ fontSize: 12, color: record.reviewResult === 'REJECTED' ? '#ff4d4f' : '#52c41a', marginTop: 4, fontWeight: 500 }}>
+                            结论：{record.reviewConclusion}
+                          </div>
+                        )}
+                      </div>
+                    )
+                  };
+                })}
+              />
+            </div>
+          )}
+
+          <div className="page-card" style={{ marginBottom: 16 }}>
             <div className="section-title"><span>流程时间线</span></div>
             <Timeline
               items={[
@@ -740,18 +836,18 @@ export default function RenewalDetailPage() {
                     </div>
                   )
                 })),
-                ...(detail.legalReviewComment ? [{
-                  color: detail.status === 'LEGAL_REVIEW_REJECTED' ? 'red' : 'purple',
-                  label: dayjs(detail.applyDate).add(2, 'minute').format('YYYY-MM-DD HH:mm'),
+                ...(detail.legalReviewRecords || []).map(r => ({
+                  color: r.reviewResult === 'PASSED' ? 'green' : 'red',
+                  label: dayjs(r.reviewedAt).format('YYYY-MM-DD HH:mm'),
                   children: (
                     <div>
-                      <b>法务复核</b>
-                      <div style={{ fontSize: 12, color: detail.status === 'LEGAL_REVIEW_REJECTED' ? '#ff4d4f' : '#8c8c8c' }}>
-                        {detail.legalName || '法务'}：{detail.legalReviewComment}
+                      <b>法务{REVIEW_RESULT_LABELS[r.reviewResult]?.text || '复核'}</b>
+                      <div style={{ fontSize: 12, color: r.reviewResult === 'REJECTED' ? '#ff4d4f' : '#8c8c8c' }}>
+                        {r.reviewerName}：{r.reviewConclusion || r.reviewComment}
                       </div>
                     </div>
                   )
-                }] : []),
+                })),
                 ...(detail.contractVersions || []).map(c => ({
                   color: c.isEffective ? 'green' : 'default',
                   label: dayjs(c.generatedAt).format('YYYY-MM-DD HH:mm'),

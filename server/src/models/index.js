@@ -10,6 +10,7 @@ const { ContractVersion, CONTRACT_STATUS } = require('./ContractVersion');
 const { SignState, SIGN_PARTY, SIGN_STATE_STATUS } = require('./SignState');
 const { ExpiryReminder, REMINDER_STATUS, REMINDER_LEVEL } = require('./ExpiryReminder');
 const { AuditLog, AUDIT_ACTION } = require('./AuditLog');
+const { LegalReviewRecord, REVIEW_TYPE, REVIEW_RESULT } = require('./LegalReviewRecord');
 
 function setupAssociations() {
   Lease.belongsTo(User, { as: 'tenant', foreignKey: 'tenantId', constraints: false });
@@ -29,6 +30,7 @@ function setupAssociations() {
   RenewalApplication.hasMany(Attachment, { foreignKey: 'renewalId', as: 'attachments' });
   RenewalApplication.hasMany(ContractVersion, { foreignKey: 'renewalId', as: 'contractVersions' });
   RenewalApplication.hasMany(SignState, { foreignKey: 'renewalId', as: 'signStates' });
+  RenewalApplication.hasMany(LegalReviewRecord, { foreignKey: 'renewalId', as: 'legalReviewRecords' });
 
   RentPlan.belongsTo(RenewalApplication, { foreignKey: 'renewalId', as: 'renewal' });
   RentPlan.belongsTo(Threshold, { foreignKey: 'thresholdId', as: 'threshold', constraints: false });
@@ -63,5 +65,6 @@ module.exports = {
   SignState, SIGN_PARTY, SIGN_STATE_STATUS,
   ExpiryReminder, REMINDER_STATUS, REMINDER_LEVEL,
   AuditLog, AUDIT_ACTION,
+  LegalReviewRecord, REVIEW_TYPE, REVIEW_RESULT,
   setupAssociations
 };

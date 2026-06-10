@@ -59,3 +59,15 @@ export const NEGOTIATION_TYPE_LABELS = {
   HOUSEKEEPER_OFFER: '管家报价',
   AGREEMENT: '双方确认'
 };
+
+export const REVIEW_TYPE_LABELS = {
+  INITIAL: '初次复核',
+  REVISION: '复核修订',
+  REOPEN: '重新复核'
+};
+
+export const REVIEW_RESULT_LABELS = {
+  PASSED: { text: '通过', color: 'success' },
+  REJECTED: { text: '驳回', color: 'error' },
+  PENDING: { text: '待复核', color: 'warning' }
+};

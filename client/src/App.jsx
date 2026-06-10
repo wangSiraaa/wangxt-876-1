@@ -9,7 +9,8 @@ import {
   BellOutlined,
   UserOutlined,
   LogoutOutlined,
-  ThunderboltOutlined
+  ThunderboltOutlined,
+  SafetyOutlined
 } from '@ant-design/icons';
 import { useNavigate, useLocation } from 'react-router-dom';
 
@@ -20,6 +21,7 @@ import RenewalListPage from './pages/RenewalListPage.jsx';
 import RenewalDetailPage from './pages/RenewalDetailPage.jsx';
 import ThresholdPage from './pages/ThresholdPage.jsx';
 import RemindersPage from './pages/RemindersPage.jsx';
+import LegalReviewPage from './pages/LegalReviewPage.jsx';
 
 import { useAuth, ROLE_LABELS } from './context/AuthContext.jsx';
 
@@ -40,6 +42,7 @@ function AppLayout() {
   const location = useLocation();
 
   const getMenuKey = () => {
+    if (location.pathname.startsWith('/renewals/legal')) return 'legal-review';
     if (location.pathname.startsWith('/renewals/')) return 'renewals';
     if (location.pathname.startsWith('/renewals')) return 'renewals';
     if (location.pathname.startsWith('/leases')) return 'leases';
@@ -94,6 +97,12 @@ function AppLayout() {
       label: '到期提醒',
       onClick: () => navigate('/reminders')
     },
+    (user?.role === 'LEGAL') ? {
+      key: 'legal-review',
+      icon: <SafetyOutlined />,
+      label: '法务复核',
+      onClick: () => navigate('/renewals/legal')
+    } : null,
     (user?.role === 'FINANCE' || user?.role === 'LEGAL') ? {
       key: 'thresholds',
       icon: <SettingOutlined />,
@@ -163,6 +172,7 @@ function AppLayout() {
             <Route path="/leases" element={<LeaseListPage />} />
             <Route path="/renewals" element={<RenewalListPage />} />
             <Route path="/renewals/:id" element={<RenewalDetailPage />} />
+            <Route path="/renewals/legal" element={<LegalReviewPage />} />
             <Route path="/thresholds" element={<ThresholdPage />} />
             <Route path="/reminders" element={<RemindersPage />} />
             <Route path="*" element={<Navigate to="/dashboard" replace />} />

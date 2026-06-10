@@ -9,6 +9,7 @@ const {
   Attachment, ATTACHMENT_TYPE, ATTACHMENT_CATEGORY,
   ContractVersion, CONTRACT_STATUS,
   SignState, SIGN_PARTY, SIGN_STATE_STATUS,
+  LegalReviewRecord, REVIEW_TYPE, REVIEW_RESULT,
   ROLES
 } = require('../models');
 const { authMiddleware, writeAudit } = require('../middleware/auth');
@@ -148,18 +149,19 @@ router.post('/', async (req, res) => {
 router.get('/:id', async (req, res) => {
   try {
     const app = await RenewalApplication.findByPk(req.params.id, {
-      include: [
-        { association: 'lease' },
-        { association: 'rentPlans', order: [['planVersion', 'DESC']] },
-        { association: 'negotiations', order: [['timestamp', 'DESC']] },
-        { association: 'attachments', order: [['uploadedAt', 'DESC']] },
-        {
-          association: 'contractVersions',
-          order: [['versionNo', 'DESC']],
-          include: [{ association: 'signStates', order: [['signOrder', 'ASC']] }]
-        }
-      ]
-    });
+    include: [
+      { association: 'lease' },
+      { association: 'rentPlans', order: [['planVersion', 'DESC']] },
+      { association: 'negotiations', order: [['timestamp', 'DESC']] },
+      { association: 'attachments', order: [['uploadedAt', 'DESC']] },
+      {
+        association: 'contractVersions',
+        order: [['versionNo', 'DESC']],
+        include: [{ association: 'signStates', order: [['signOrder', 'ASC']] }]
+      },
+      { association: 'legalReviewRecords', order: [['reviewedAt', 'DESC']] }
+    ]
+  });
     if (!app) return res.status(404).json({ error: '续签申请不存在' });
 
     if (req.user.role === ROLES.TENANT && app.tenantId !== req.user.id) {
@@ -221,15 +223,16 @@ router.post('/:id/rent-plans', async (req, res) => {
     const app = await RenewalApplication.findByPk(req.params.id);
     if (!app) return res.status(404).json({ error: '续签申请不存在' });
 
-    if (!isValidStatusTransition(app.status, RENEWAL_STATUS.RENT_PLAN_CREATED) &&
-        app.status !== RENEWAL_STATUS.NEGOTIATING &&
-        app.status !== RENEWAL_STATUS.RENT_PLAN_CREATED &&
-        app.status !== RENEWAL_STATUS.OVERDUE_PASSED) {
-      return res.status(400).json({ error: `当前状态（${app.status}）不允许创建租金方案` });
-    }
+    const allowedCreateRentPlanStatuses = [
+      RENEWAL_STATUS.OVERDUE_PASSED,
+      RENEWAL_STATUS.NEGOTIATING,
+      RENEWAL_STATUS.LEGAL_REVIEW_REJECTED,
+      RENEWAL_STATUS.LEGAL_REVIEW_PASSED
+    ];
 
-    if (app.status === RENEWAL_STATUS.RENT_PLAN_CREATED) {
-      return res.status(400).json({ error: '已有租金方案，请先进行协商或法务复核' });
+    if (!allowedCreateRentPlanStatuses.includes(app.status) &&
+        !isValidStatusTransition(app.status, RENEWAL_STATUS.RENT_PLAN_CREATED)) {
+      return res.status(400).json({ error: `当前状态（${app.status}）不允许创建租金方案` });
     }
 
     const lease = await Lease.findByPk(app.leaseId);
@@ -282,6 +285,11 @@ router.post('/:id/rent-plans', async (req, res) => {
     if (rateCheck.exceeds) {
       app.status = RENEWAL_STATUS.LEGAL_REVIEW_PENDING;
       app.currentHandlerRole = ROLES.LEGAL;
+      app.legalReviewResult = 'PENDING';
+      app.legalReviewComment = null;
+      app.legalReviewedAt = null;
+      app.lastLegalReviewResult = null;
+      app.reviewConclusion = null;
     } else {
       app.status = RENEWAL_STATUS.RENT_PLAN_CREATED;
       app.currentHandlerRole = ROLES.HOUSEKEEPER;
@@ -363,8 +371,9 @@ router.post('/:id/negotiations', async (req, res) => {
 });
 
 router.post('/:id/legal-review', async (req, res) => {
+  const t = await sequelize.transaction();
   try {
-    const app = await RenewalApplication.findByPk(req.params.id);
+    const app = await RenewalApplication.findByPk(req.params.id, { transaction: t });
     if (!app) return res.status(404).json({ error: '续签申请不存在' });
 
     if (app.status !== RENEWAL_STATUS.LEGAL_REVIEW_PENDING) {
@@ -379,27 +388,71 @@ router.post('/:id/legal-review', async (req, res) => {
       return res.status(403).json({ error: '越权操作：当前处理角色不是法务' });
     }
 
-    const { passed, comment } = req.body;
+    const { passed, comment, conclusion, reviewConclusion } = req.body;
+    const rentPlan = await RentPlan.findOne({
+      where: { renewalId: app.id, status: { [Op.ne]: RENT_PLAN_STATUS.SUPERSEDED } },
+      order: [['planVersion', 'DESC']],
+      transaction: t
+    });
+
+    const reviewResult = passed ? REVIEW_RESULT.PASSED : REVIEW_RESULT.REJECTED;
+    const finalReviewConclusion = reviewConclusion || conclusion || (passed
+      ? `租金涨幅 ${((rentPlan?.increaseRate || 0) * 100).toFixed(2)}%，在可接受范围内，同意通过。`
+      : `租金涨幅过高，建议重新协商。具体意见：${comment || '涨幅超出合理范围'}`);
+
+    await LegalReviewRecord.create({
+      renewalId: app.id,
+      rentPlanId: rentPlan?.id,
+      reviewType: app.legalReviewCount > 0 ? REVIEW_TYPE.REVISION : REVIEW_TYPE.INITIAL,
+      reviewerId: req.user.id,
+      reviewerName: req.user.realName,
+      reviewResult,
+      reviewComment: comment || '',
+      previousRent: rentPlan?.previousRent,
+      proposedRent: rentPlan?.proposedRent,
+      increaseRate: rentPlan?.increaseRate,
+      thresholdRate: rentPlan?.thresholdRate,
+      exceedsThreshold: rentPlan?.exceedsThreshold,
+      reviewConclusion: finalReviewConclusion,
+      version: 1
+    }, { transaction: t });
+
     app.legalId = req.user.id;
     app.legalName = req.user.realName;
     app.legalReviewComment = comment || (passed ? '法务复核通过' : '法务复核驳回');
+    app.legalReviewResult = reviewResult;
+    app.legalReviewedAt = new Date();
+    app.legalReviewCount = (app.legalReviewCount || 0) + 1;
+    app.lastLegalReviewResult = reviewResult;
+    app.reviewConclusion = finalReviewConclusion;
     app.version = (app.version || 0) + 1;
 
     if (passed) {
       app.status = RENEWAL_STATUS.LEGAL_REVIEW_PASSED;
       app.currentHandlerRole = ROLES.HOUSEKEEPER;
       writeAudit(req, AUDIT_ACTION.APPROVE, 'RenewalApplication', app.id, app.appNo,
-        `法务复核通过：${comment || ''}`, null, { status: app.status });
+        `法务复核通过：${comment || ''}`, null, { status: app.status, reviewConclusion: finalReviewConclusion });
     } else {
       app.status = RENEWAL_STATUS.LEGAL_REVIEW_REJECTED;
       app.currentHandlerRole = ROLES.HOUSEKEEPER;
       writeAudit(req, AUDIT_ACTION.REJECT, 'RenewalApplication', app.id, app.appNo,
-        `法务复核驳回：${comment || ''}`, null, { status: app.status });
+        `法务复核驳回：${comment || ''}`, null, { status: app.status, reviewConclusion: finalReviewConclusion });
     }
 
-    await app.save();
-    res.json(app);
+    await app.save({ transaction: t });
+    await t.commit();
+
+    const reviewRecords = await LegalReviewRecord.findAll({
+      where: { renewalId: app.id },
+      order: [['reviewedAt', 'DESC']]
+    });
+
+    res.json({
+      ...app.toJSON(),
+      legalReviewRecords: reviewRecords
+    });
   } catch (e) {
+    try { await t.rollback(); } catch (_) {}
     res.status(500).json({ error: e.message });
   }
 });
@@ -774,6 +827,67 @@ router.get('/:id/audit-logs', async (req, res) => {
     });
 
     res.json(logs);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+router.get('/:id/legal-review-records', async (req, res) => {
+  try {
+    const app = await RenewalApplication.findByPk(req.params.id);
+    if (!app) return res.status(404).json({ error: '续签申请不存在' });
+
+    const records = await LegalReviewRecord.findAll({
+      where: { renewalId: req.params.id },
+      order: [['reviewedAt', 'DESC']]
+    });
+
+    res.json(records);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+router.get('/legal/pending', async (req, res) => {
+  try {
+    if (req.user.role !== ROLES.LEGAL) {
+      return res.status(403).json({ error: '仅法务角色可查询' });
+    }
+
+    const pendingReviews = await RenewalApplication.findAll({
+      where: {
+        status: RENEWAL_STATUS.LEGAL_REVIEW_PENDING,
+        currentHandlerRole: ROLES.LEGAL
+      },
+      include: [
+        { association: 'lease', attributes: ['leaseNo', 'currentRent', 'propertyAddr', 'tenantName'] },
+        { association: 'rentPlans', limit: 1, order: [['planVersion', 'DESC']] }
+      ],
+      order: [['applyDate', 'DESC']]
+    });
+
+    const myReviewed = await RenewalApplication.findAll({
+      where: {
+        legalId: req.user.id,
+        status: {
+          [Op.in]: [RENEWAL_STATUS.LEGAL_REVIEW_PASSED, RENEWAL_STATUS.LEGAL_REVIEW_REJECTED]
+        }
+      },
+      include: [
+        { association: 'lease', attributes: ['leaseNo', 'currentRent', 'propertyAddr', 'tenantName'] }
+      ],
+      order: [['legalReviewedAt', 'DESC']],
+      limit: 20
+    });
+
+    res.json({
+      pending: pendingReviews,
+      reviewed: myReviewed,
+      stats: {
+        pendingCount: pendingReviews.length,
+        reviewedCount: myReviewed.length
+      }
+    });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }

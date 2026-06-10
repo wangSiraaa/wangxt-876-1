@@ -68,6 +68,17 @@ const RenewalApplication = sequelize.define('RenewalApplication', {
   currentHandlerId: DataTypes.UUID,
   overdueCheckResult: DataTypes.TEXT,
   legalReviewComment: DataTypes.TEXT,
+  legalReviewResult: {
+    type: DataTypes.ENUM('PASSED', 'REJECTED', 'PENDING'),
+    defaultValue: 'PENDING'
+  },
+  legalReviewedAt: DataTypes.DATE,
+  legalReviewCount: {
+    type: DataTypes.INTEGER,
+    defaultValue: 0
+  },
+  lastLegalReviewResult: DataTypes.TEXT,
+  reviewConclusion: DataTypes.TEXT,
   archiveDate: DataTypes.DATE,
   version: {
     type: DataTypes.INTEGER,

@@ -12,6 +12,8 @@
     "build": "npm run build --prefix client",
     "start": "npm run start --prefix server",
     "smoke": "node scripts/smoke.js",
+    "check:legal-review-loop": "node scripts/check-legal-review-loop.js",
+    "check": "npm run smoke && npm run check:legal-review-loop",
     "docker:up": "docker-compose up -d",
     "docker:down": "docker-compose down"
   },

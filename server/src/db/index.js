@@ -19,4 +19,14 @@ const sequelize = new Sequelize({
   }
 });
 
-module.exports = { sequelize, DataTypes };
+async function initSQLitePragmas() {
+  try {
+    await sequelize.query('PRAGMA journal_mode = WAL;');
+    await sequelize.query('PRAGMA busy_timeout = 10000;');
+    await sequelize.query('PRAGMA foreign_keys = ON;');
+  } catch (e) {
+    console.warn('SQLite PRAGMA init warning:', e.message);
+  }
+}
+
+module.exports = { sequelize, DataTypes, initSQLitePragmas };

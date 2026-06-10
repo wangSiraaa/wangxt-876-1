@@ -366,12 +366,18 @@ export default function RenewalDetailPage() {
     if (s === 'SIGNING_PENDING') {
       const contract = (detail.contractVersions || []).find(c => c.isEffective);
       if (contract) {
-        (contract.signStates || []).forEach(ss => {
+        const partyToRole = {
+          TENANT: 'TENANT',
+          COMPANY_LEGAL: 'LEGAL',
+          SIGN_ADMIN: 'SIGN_ADMIN'
+        };
+        (contract.signStates || []).sort((a, b) => a.signOrder - b.signOrder).forEach(ss => {
           let canSignHere = false;
           if (ss.party === 'TENANT' && canTenant) canSignHere = true;
           if (ss.party === 'COMPANY_LEGAL' && canLegal) canSignHere = true;
           if (ss.party === 'SIGN_ADMIN' && canSignAdmin) canSignHere = true;
-          if (canSignHere && ss.status !== 'SIGNED') {
+          const isMyTurn = partyToRole[ss.party] === detail.currentHandlerRole;
+          if (canSignHere && ss.status !== 'SIGNED' && isMyTurn) {
             actions.push({
               label: `我来签 - ${SIGN_PARTY_LABELS[ss.party]}`,
               type: 'primary',

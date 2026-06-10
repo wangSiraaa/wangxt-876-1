@@ -14,7 +14,7 @@
 
 const http = require('http');
 
-const API_BASE = process.env.API_BASE || 'http://localhost:3000';
+const API_BASE = process.env.API_BASE || 'http://localhost:3005';
 
 function request(method, path, body = null, token = null, json = true) {
   return new Promise((resolve, reject) => {

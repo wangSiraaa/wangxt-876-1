@@ -230,6 +230,139 @@ async function testScenario3(ctx) {
   }
 }
 
+async function testScenario4() {
+  console.log('\n========== 场景 4: 签署全链路（生成合同→上传附件→三方签署→归档） ==========');
+  try {
+    const tenantToken = await login('tenant1');
+    const hkToken = await login('housekeeper');
+    const legalToken = await login('legal');
+    const signAdminToken = await login('signadmin');
+    const financeToken = await login('finance');
+
+    const leases = await getMyLeases(hkToken);
+    const lease = (leases.data || leases)[0];
+    console.log('  📋 选定租约:', lease.leaseNo, '当前租金:', lease.currentRent);
+
+    let r = await httpRequest('POST', '/api/renewals', {
+      leaseId: lease.id,
+      reason: '场景4 全链路签署回归'
+    }, tenantToken);
+    const renewal = r.body?.data || r.body;
+    const renewalId = renewal.id;
+    console.log('  ✅ 续签已创建, ID:', renewalId.slice(0, 8) + '...');
+
+    r = await httpRequest('POST', `/api/renewals/${renewalId}/rent-plans`, {
+      proposedRent: Math.round(lease.currentRent * 1.05),
+      leaseTermMonths: 12,
+      notes: '场景4，5%涨幅，不超阈值'
+    }, hkToken);
+    assert(r.status < 400, '租金方案创建成功（不超阈值）');
+    console.log('  ✅ 租金方案创建，状态:', (r.body?.data || r.body)?.application?.status || (r.body?.data || r.body)?.status);
+
+    const detail0 = await httpRequest('GET', `/api/renewals/${renewalId}`, null, hkToken);
+    const appVer = (detail0.body?.data || detail0.body)?.version || 0;
+    r = await httpRequest('POST', `/api/renewals/${renewalId}/generate-contract`, {
+      remark: '场景4 合同生成',
+      expectedVersion: appVer
+    }, hkToken);
+    assert(r.status === 200 || r.status === 201, '合同生成成功');
+    const genData = r.body?.data || r.body;
+    const contractId = genData?.contract?.id || genData?.contractVersion?.id;
+    console.log('  ✅ 合同已生成, contractId:', contractId?.slice?.(0, 8) + '...');
+
+    const { Attachment, ATTACHMENT_TYPE, ATTACHMENT_CATEGORY } = models;
+    const hkUserInfo = await httpRequest('GET', '/api/auth/me', null, hkToken);
+    const uploaderId = (hkUserInfo.body?.data || hkUserInfo.body)?.id || (hkUserInfo.body?.user || {})?.id;
+    const uploaderName = (hkUserInfo.body?.data || hkUserInfo.body)?.realName || (hkUserInfo.body?.user || {})?.realName || '管家-小林';
+
+    const requiredTypes = ['ID_CARD', 'RENT_CERT', 'CONTRACT_DRAFT'];
+    for (const t of requiredTypes) {
+      await Attachment.create({
+        renewalId,
+        fileName: `${t}_示例.pdf`,
+        filePath: `mock_${t}_${Date.now()}.pdf`,
+        fileSize: 10240,
+        mimeType: 'application/pdf',
+        type: t,
+        category: ATTACHMENT_CATEGORY.REQUIRED_FOR_SIGN,
+        uploadedBy: uploaderId,
+        uploadedByName: uploaderName,
+        isRequired: true
+      });
+    }
+    console.log('  ✅ 已创建 3 个必要附件（模拟上传）');
+
+    r = await httpRequest('POST', `/api/renewals/${renewalId}/prepare-signing`, {}, hkToken);
+    assert(r.status < 400, '进入签署阶段成功');
+    const prepData = r.body?.data || r.body;
+    assert(prepData.currentHandlerRole === 'TENANT',
+      `进入签署后当前处理角色为 TENANT（实际: ${prepData.currentHandlerRole}）`);
+    console.log('  ✅ 进入签署阶段，当前处理角色:', prepData.currentHandlerRole);
+
+    r = await httpRequest('POST', `/api/renewals/${renewalId}/sign/${contractId}`, {
+      party: 'COMPANY_LEGAL',
+      signature: 'test_legal_skip'
+    }, legalToken);
+    assert(r.status === 403, '法务越权先签被拦截（403）');
+    console.log('  ✅ 越权拦截：法务在租客之前签署 → HTTP', r.status);
+
+    r = await httpRequest('POST', `/api/renewals/${renewalId}/sign/${contractId}`, {
+      party: 'TENANT',
+      signature: 'ZHANG_SAN_SIGN'
+    }, tenantToken);
+    assert(r.status < 400, '租客签署成功');
+    const tenantSignData = r.body;
+    assert(tenantSignData.application?.currentHandlerRole === 'LEGAL',
+      `租客签完后当前处理角色切到 LEGAL（实际: ${tenantSignData.application?.currentHandlerRole}）`);
+    console.log('  ✅ 租客签署完成，当前处理角色 →', tenantSignData.application?.currentHandlerRole);
+
+    r = await httpRequest('POST', `/api/renewals/${renewalId}/sign/${contractId}`, {
+      party: 'SIGN_ADMIN',
+      signature: 'test_signadmin_skip'
+    }, signAdminToken);
+    assert(r.status === 403, '签管越权先签被拦截（403）');
+    console.log('  ✅ 越权拦截：签署管理员在法务之前签署 → HTTP', r.status);
+
+    r = await httpRequest('POST', `/api/renewals/${renewalId}/sign/${contractId}`, {
+      party: 'COMPANY_LEGAL',
+      signature: 'LIU_LAWYER_SIGN'
+    }, legalToken);
+    assert(r.status < 400, '法务签署成功');
+    const legalSignData = r.body;
+    assert(legalSignData.application?.currentHandlerRole === 'SIGN_ADMIN',
+      `法务签完后当前处理角色切到 SIGN_ADMIN（实际: ${legalSignData.application?.currentHandlerRole}）`);
+    console.log('  ✅ 法务签署完成，当前处理角色 →', legalSignData.application?.currentHandlerRole);
+
+    r = await httpRequest('POST', `/api/renewals/${renewalId}/sign/${contractId}`, {
+      party: 'SIGN_ADMIN',
+      signature: 'ZHOU_SIGNADMIN_SIGN'
+    }, signAdminToken);
+    assert(r.status < 400, '签署管理员签署成功');
+    const finalSignData = r.body;
+    assert(finalSignData.allSigned === true, '全部签署完成（allSigned=true）');
+    assert(finalSignData.application?.status === 'SIGNED',
+      `全部签完后状态为 SIGNED（实际: ${finalSignData.application?.status}）`);
+    assert(finalSignData.application?.currentHandlerRole === 'FINANCE',
+      `全部签完后当前处理角色切到 FINANCE（实际: ${finalSignData.application?.currentHandlerRole}）`);
+    console.log('  ✅ 签署管理员签署完成，状态 →', finalSignData.application?.status,
+      '，当前处理角色 →', finalSignData.application?.currentHandlerRole);
+
+    r = await httpRequest('POST', `/api/renewals/${renewalId}/archive`, {
+      remark: '场景4 归档测试'
+    }, financeToken);
+    assert(r.status < 400, '财务归档成功');
+    const archiveData = r.body?.data || r.body;
+    assert(archiveData.status === 'ARCHIVED',
+      `归档后状态为 ARCHIVED（实际: ${archiveData.status}）`);
+    console.log('  ✅ 财务归档完成，最终状态:', archiveData.status);
+
+    assert(true, '场景 4 综合判定（生成合同→上传附件→按序签署→归档全链路通过）');
+  } catch (e) {
+    console.error('  场景 4 异常:', e.message, e.stack?.slice(0, 400));
+    failed++;
+  }
+}
+
 async function main() {
   let server;
   try {
@@ -245,6 +378,7 @@ async function main() {
   await testScenario1();
   const ctx = await testScenario2();
   await testScenario3(ctx);
+  await testScenario4();
 
   console.log('\n======================');
   console.log(`📊 结果: PASS=${passed}, FAIL=${failed}`);

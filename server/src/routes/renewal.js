@@ -17,7 +17,8 @@ const {
   checkOverdue, checkIncreaseRate, checkHandlerPermission,
   hasEffectiveContract, getMaxContractVersionNo,
   checkRequiredAttachments, obsoleteExistingContracts,
-  initializeSignStates, checkOptimisticLock,
+  initializeSignStates, getNextSignerRole,
+  checkOptimisticLock,
   isValidStatusTransition, HANDLER_BY_STATUS,
   REQUIRED_ATTACHMENT_TYPES
 } = require('../services/businessRules');
@@ -65,7 +66,6 @@ router.get('/', async (req, res) => {
 });
 
 router.post('/', async (req, res) => {
-  const t = await sequelize.transaction();
   try {
     const { leaseId, expectedLeaseTerm = 12 } = req.body;
 
@@ -81,7 +81,37 @@ router.post('/', async (req, res) => {
     const tenantId = lease.tenantId;
     const overdue = await checkOverdue(tenantId, leaseId);
 
-    if (overdue.hasOverdue) {
+    const t = await sequelize.transaction();
+    try {
+      if (overdue.hasOverdue) {
+        const app = await RenewalApplication.create({
+          appNo: genAppNo(),
+          leaseId,
+          tenantId,
+          tenantName: lease.tenantName,
+          propertyAddr: lease.propertyAddr,
+          applicantId: req.user.id,
+          applicantName: req.user.realName,
+          expectedLeaseTerm,
+          status: RENEWAL_STATUS.OVERDUE_REJECTED,
+          currentHandlerRole: ROLES.FINANCE,
+          housekeeperId: lease.housekeeperId,
+          housekeeperName: lease.housekeeperName,
+          overdueCheckResult: overdue.message,
+          version: 1
+        }, { transaction: t });
+
+        await t.commit();
+        writeAudit(req, AUDIT_ACTION.CREATE, 'RenewalApplication', app.id, app.appNo,
+          `发起续签被拒：${overdue.message}`, null, { status: RENEWAL_STATUS.OVERDUE_REJECTED });
+
+        return res.status(400).json({
+          error: overdue.message,
+          rejected: true,
+          application: app
+        });
+      }
+
       const app = await RenewalApplication.create({
         appNo: genAppNo(),
         leaseId,
@@ -90,9 +120,10 @@ router.post('/', async (req, res) => {
         propertyAddr: lease.propertyAddr,
         applicantId: req.user.id,
         applicantName: req.user.realName,
+        expectedStartDate: lease.endDate,
         expectedLeaseTerm,
-        status: RENEWAL_STATUS.OVERDUE_REJECTED,
-        currentHandlerRole: ROLES.FINANCE,
+        status: RENEWAL_STATUS.OVERDUE_PASSED,
+        currentHandlerRole: ROLES.HOUSEKEEPER,
         housekeeperId: lease.housekeeperId,
         housekeeperName: lease.housekeeperName,
         overdueCheckResult: overdue.message,
@@ -101,40 +132,14 @@ router.post('/', async (req, res) => {
 
       await t.commit();
       writeAudit(req, AUDIT_ACTION.CREATE, 'RenewalApplication', app.id, app.appNo,
-        `发起续签被拒：${overdue.message}`, null, { status: RENEWAL_STATUS.OVERDUE_REJECTED });
+        '发起续签申请，欠费校验通过', null, { status: RENEWAL_STATUS.OVERDUE_PASSED });
 
-      return res.status(400).json({
-        error: overdue.message,
-        rejected: true,
-        application: app
-      });
+      res.json(app);
+    } catch (txErr) {
+      try { try { await t.rollback(); } catch (_) {} } catch (_) {}
+      throw txErr;
     }
-
-    const app = await RenewalApplication.create({
-      appNo: genAppNo(),
-      leaseId,
-      tenantId,
-      tenantName: lease.tenantName,
-      propertyAddr: lease.propertyAddr,
-      applicantId: req.user.id,
-      applicantName: req.user.realName,
-      expectedStartDate: lease.endDate,
-      expectedLeaseTerm,
-      status: RENEWAL_STATUS.OVERDUE_PASSED,
-      currentHandlerRole: ROLES.HOUSEKEEPER,
-      housekeeperId: lease.housekeeperId,
-      housekeeperName: lease.housekeeperName,
-      overdueCheckResult: overdue.message,
-      version: 1
-    }, { transaction: t });
-
-    await t.commit();
-    writeAudit(req, AUDIT_ACTION.CREATE, 'RenewalApplication', app.id, app.appNo,
-      '发起续签申请，欠费校验通过', null, { status: RENEWAL_STATUS.OVERDUE_PASSED });
-
-    res.json(app);
   } catch (e) {
-    await t.rollback();
     console.error(e);
     res.status(500).json({ error: e.message });
   }
@@ -306,7 +311,7 @@ router.post('/:id/rent-plans', async (req, res) => {
       obsoletedContractCount: obsoletedCount
     });
   } catch (e) {
-    await t.rollback();
+    try { await t.rollback(); } catch (_) {}
     console.error(e);
     res.status(500).json({ error: e.message });
   }
@@ -409,7 +414,7 @@ router.post('/:id/generate-contract', async (req, res) => {
     try {
       await checkOptimisticLock(RenewalApplication, app, prevVersion, '续签申请');
     } catch (lockErr) {
-      await t.rollback();
+      try { await t.rollback(); } catch (_) {}
       return res.status(409).json({
         error: lockErr.message,
         code: 'OPTIMISTIC_LOCK'
@@ -503,7 +508,7 @@ router.post('/:id/generate-contract', async (req, res) => {
       rentPlan
     });
   } catch (e) {
-    await t.rollback();
+    try { await t.rollback(); } catch (_) {}
     if (e.message && e.message.includes('乐观锁')) {
       return res.status(409).json({ error: e.message });
     }
@@ -542,7 +547,7 @@ router.post('/:id/prepare-signing', async (req, res) => {
     }
 
     app.status = RENEWAL_STATUS.SIGNING_PENDING;
-    app.currentHandlerRole = ROLES.SIGN_ADMIN;
+    app.currentHandlerRole = ROLES.TENANT;
     app.version = (app.version || 0) + 1;
     await app.save();
 
@@ -556,17 +561,16 @@ router.post('/:id/prepare-signing', async (req, res) => {
 });
 
 router.post('/:id/sign/:contractVersionId', async (req, res) => {
-  const t = await sequelize.transaction();
   try {
     const { party, signature, comment } = req.body;
-    const app = await RenewalApplication.findByPk(req.params.id, { transaction: t });
+    const app = await RenewalApplication.findByPk(req.params.id);
     if (!app) return res.status(404).json({ error: '续签申请不存在' });
 
     if (app.status !== RENEWAL_STATUS.SIGNING_PENDING) {
       return res.status(400).json({ error: '当前状态不允许签署' });
     }
 
-    const contract = await ContractVersion.findByPk(req.params.contractVersionId, { transaction: t });
+    const contract = await ContractVersion.findByPk(req.params.contractVersionId);
     if (!contract) return res.status(404).json({ error: '合同版本不存在' });
     if (!contract.isEffective) return res.status(400).json({ error: '合同版本已失效' });
 
@@ -590,77 +594,103 @@ router.post('/:id/sign/:contractVersionId', async (req, res) => {
       return res.status(400).json({ error: '无效的签署方' });
     }
 
-    if (app.currentHandlerRole && partyRole !== app.currentHandlerRole &&
-        !(party === SIGN_PARTY.TENANT && req.user.role === ROLES.TENANT)) {
+    if (partyRole !== app.currentHandlerRole) {
       return res.status(403).json({
-        error: `越权签署：当前处理角色为 ${app.currentHandlerRole}，应由 ${partyRole} 先签或按顺序签署`
+        error: `越权签署：当前处理角色为 ${app.currentHandlerRole}，按签署顺序应由 ${app.currentHandlerRole} 先签署`
       });
     }
 
-    const signState = await SignState.findOne({
+    const signStateCheck = await SignState.findOne({
       where: {
         contractVersionId: contract.id,
         party,
         renewalId: app.id
-      },
-      transaction: t
+      }
     });
-    if (!signState) return res.status(404).json({ error: '签署状态记录不存在' });
-    if (signState.status === SIGN_STATE_STATUS.SIGNED) {
+    if (!signStateCheck) return res.status(404).json({ error: '签署状态记录不存在' });
+    if (signStateCheck.status === SIGN_STATE_STATUS.SIGNED) {
       return res.status(400).json({ error: '该方已签署，请勿重复签署' });
     }
 
-    signState.status = SIGN_STATE_STATUS.SIGNED;
-    signState.signerId = req.user.id;
-    signState.signerName = req.user.realName;
-    signState.signedAt = new Date();
-    signState.signature = signature || `SIGNATURE_${party}_${Date.now()}`;
-    signState.comment = comment || null;
-    signState.version = (signState.version || 0) + 1;
-    await signState.save({ transaction: t });
+    const t = await sequelize.transaction();
+    try {
+      const appLocked = await RenewalApplication.findByPk(req.params.id, {
+        lock: true,
+        transaction: t
+      });
+      const contractLocked = await ContractVersion.findByPk(req.params.contractVersionId, {
+        lock: true,
+        transaction: t
+      });
+      const signState = await SignState.findOne({
+        where: {
+          contractVersionId: contractLocked.id,
+          party,
+          renewalId: appLocked.id
+        },
+        lock: true,
+        transaction: t
+      });
 
-    if (party === SIGN_PARTY.TENANT) {
-      contract.signedByTenantAt = new Date();
-      contract.signedByTenantId = req.user.id;
+      signState.status = SIGN_STATE_STATUS.SIGNED;
+      signState.signerId = req.user.id;
+      signState.signerName = req.user.realName;
+      signState.signedAt = new Date();
+      signState.signature = signature || `SIGNATURE_${party}_${Date.now()}`;
+      signState.comment = comment || null;
+      signState.version = (signState.version || 0) + 1;
+      await signState.save({ transaction: t });
+
+      if (party === SIGN_PARTY.TENANT) {
+        contractLocked.signedByTenantAt = new Date();
+        contractLocked.signedByTenantId = req.user.id;
+      }
+      if (party === SIGN_PARTY.SIGN_ADMIN) {
+        contractLocked.signedByCompanyAt = new Date();
+        contractLocked.signedByCompanyId = req.user.id;
+      }
+
+      const allSignStates = await SignState.findAll({
+        where: { contractVersionId: contractLocked.id },
+        order: [['signOrder', 'ASC']],
+        transaction: t
+      });
+      const allSigned = allSignStates.every(s => s.status === SIGN_STATE_STATUS.SIGNED);
+      const anySigned = allSignStates.some(s => s.status === SIGN_STATE_STATUS.SIGNED);
+
+      if (allSigned) {
+        contractLocked.status = CONTRACT_STATUS.FULLY_SIGNED;
+        appLocked.status = RENEWAL_STATUS.SIGNED;
+        appLocked.currentHandlerRole = ROLES.FINANCE;
+      } else if (anySigned) {
+        contractLocked.status = CONTRACT_STATUS.PARTIALLY_SIGNED;
+        const next = await getNextSignerRole(contractLocked.id, t);
+        if (next) {
+          appLocked.currentHandlerRole = next.role;
+        }
+      }
+      contractLocked.version = (contractLocked.version || 0) + 1;
+      await contractLocked.save({ transaction: t });
+
+      appLocked.version = (appLocked.version || 0) + 1;
+      await appLocked.save({ transaction: t });
+
+      await t.commit();
+
+      writeAudit(req, AUDIT_ACTION.SIGN, 'ContractVersion', contractLocked.id, contractLocked.contractNo,
+        `${party} 签署完成 (${req.user.realName})`, null, { party, status: signState.status });
+
+      res.json({
+        application: appLocked,
+        contract: contractLocked,
+        signState,
+        allSigned
+      });
+    } catch (innerE) {
+      try { await t.rollback(); } catch (_) {}
+      throw innerE;
     }
-    if (party === SIGN_PARTY.SIGN_ADMIN) {
-      contract.signedByCompanyAt = new Date();
-      contract.signedByCompanyId = req.user.id;
-    }
-
-    const allSignStates = await SignState.findAll({
-      where: { contractVersionId: contract.id },
-      transaction: t
-    });
-    const allSigned = allSignStates.every(s => s.status === SIGN_STATE_STATUS.SIGNED);
-    const anySigned = allSignStates.some(s => s.status === SIGN_STATE_STATUS.SIGNED);
-
-    if (allSigned) {
-      contract.status = CONTRACT_STATUS.FULLY_SIGNED;
-      app.status = RENEWAL_STATUS.SIGNED;
-      app.currentHandlerRole = ROLES.FINANCE;
-    } else if (anySigned) {
-      contract.status = CONTRACT_STATUS.PARTIALLY_SIGNED;
-    }
-    contract.version = (contract.version || 0) + 1;
-    await contract.save({ transaction: t });
-
-    app.version = (app.version || 0) + 1;
-    await app.save({ transaction: t });
-
-    await t.commit();
-
-    writeAudit(req, AUDIT_ACTION.SIGN, 'ContractVersion', contract.id, contract.contractNo,
-      `${party} 签署完成 (${req.user.realName})`, null, { party, status: signState.status });
-
-    res.json({
-      application: app,
-      contract,
-      signState,
-      allSigned
-    });
   } catch (e) {
-    await t.rollback();
     console.error(e);
     res.status(500).json({ error: e.message });
   }

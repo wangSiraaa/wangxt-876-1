@@ -3,7 +3,7 @@ const cors = require('cors');
 const path = require('path');
 const fs = require('fs');
 
-const { sequelize } = require('./db');
+const { sequelize, initSQLitePragmas } = require('./db');
 const models = require('./models');
 
 const authRoutes = require('./routes/auth');
@@ -56,7 +56,8 @@ async function bootstrap() {
   try {
     models.setupAssociations();
     await sequelize.authenticate();
-    await sequelize.sync({ alter: true });
+    await initSQLitePragmas();
+    await sequelize.sync(); // 只创建不存在的表，不修改已有表结构（避免 SQLite 外键约束下 alter 丢数据）
     console.log('✅ 数据库连接与模型同步完成');
 
     app.listen(PORT, () => {

@@ -183,6 +183,25 @@ async function initializeSignStates(contractVersionId, renewalId, tenantId, lega
   return await SignState.bulkCreate(states, { transaction });
 }
 
+async function getNextSignerRole(contractVersionId, transaction) {
+  const states = await SignState.findAll({
+    where: { contractVersionId },
+    order: [['signOrder', 'ASC']],
+    transaction
+  });
+
+  for (const s of states) {
+    if (s.status === SIGN_STATE_STATUS.PENDING) {
+      return {
+        role: s.signerRole,
+        party: s.party,
+        signOrder: s.signOrder
+      };
+    }
+  }
+  return null;
+}
+
 async function checkOptimisticLock(model, entity, expectedVersion, entityName) {
   if (!entity) {
     throw new Error(`${entityName}不存在`);
@@ -280,6 +299,7 @@ module.exports = {
   checkRequiredAttachments,
   obsoleteExistingContracts,
   initializeSignStates,
+  getNextSignerRole,
   checkOptimisticLock,
   isValidStatusTransition,
   HANDLER_BY_STATUS,
